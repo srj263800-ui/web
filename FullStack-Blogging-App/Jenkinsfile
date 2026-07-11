@@ -17,7 +17,7 @@ pipeline {
             steps {
                 git branch: 'main',
                     credentialsId: 'git-cred',
-                    url: 'https://github.com/ronnieandbarty73-create/Dev-project.git'
+                    url: 'https://github.com/srj263800-ui/web.git'
             }
         }
 
