@@ -1,86 +1,139 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+
     environment {
-        APP_NAME = "fullstack-blogging-app"
-        DOCKER_IMAGE = "fullstack-blogging-app"
+        SCANNER_HOME = tool 'sonar-scanner'
+        IMAGE_NAME = "abrahimcse/bloggingapp:latest"
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Git Checkout') {
             steps {
-                echo "Checking out source code..."
-                checkout scm
+                git branch: 'main',
+                    credentialsId: 'git-cred',
+                    url: 'https://github.com/ronnieandbarty73-create/Dev-project.git'
             }
         }
 
-        stage('Install Dependencies') {
+        stage('Compile') {
             steps {
-                echo "Installing dependencies..."
-
-                dir('FullStack-Blogging-App') {
-                    sh '''
-                        echo "Installing frontend/backend dependencies"
-                        # Add your commands here
-                        # Example:
-                        # npm install
-                    '''
-                }
-            }
-        }
-
-        stage('Build') {
-            steps {
-                echo "Building application..."
-
-                dir('FullStack-Blogging-App') {
-                    sh '''
-                        echo "Running build"
-                        # Example:
-                        # npm run build
-                    '''
-                }
+                sh 'mvn clean compile'
             }
         }
 
         stage('Test') {
             steps {
-                echo "Running tests..."
+                sh 'mvn test'
+            }
+        }
 
-                dir('FullStack-Blogging-App') {
-                    sh '''
-                        echo "Running test cases"
-                        # Example:
-                        # npm test
-                    '''
+        stage('File System Scan') {
+            steps {
+                sh 'trivy fs .'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh """
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectKey=bloggingapp \
+                        -Dsonar.projectName=bloggingapp \
+                        -Dsonar.java.binaries=.
+                    """
                 }
             }
         }
 
-        stage('Docker Build') {
+        stage('Quality Gate') {
             steps {
-                echo "Building Docker image..."
-
-                sh '''
-                    docker build -t ${DOCKER_IMAGE}:latest .
-                '''
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
         }
 
-        stage('Docker Run') {
+        stage('Build Package') {
             steps {
-                echo "Starting Docker container..."
+                sh 'mvn clean package'
+            }
+        }
 
-                sh '''
-                    docker stop ${APP_NAME} || true
-                    docker rm ${APP_NAME} || true
+        stage('Publish To Nexus') {
+            steps {
+                withMaven(
+                    jdk: 'jdk17',
+                    maven: 'maven3',
+                    globalMavenSettingsConfig: 'global-settings'
+                ) {
+                    sh 'mvn deploy'
+                }
+            }
+        }
 
-                    docker run -d \
-                    --name ${APP_NAME} \
-                    -p 3000:3000 \
-                    ${DOCKER_IMAGE}:latest
-                '''
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    withDockerRegistry(
+                        credentialsId: 'docker-cred',
+                        toolName: 'docker'
+                    ) {
+                        sh "docker build -t ${IMAGE_NAME} ."
+                    }
+                }
+            }
+        }
+
+        stage('Scan Docker Image') {
+            steps {
+                sh "trivy image ${IMAGE_NAME}"
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    withDockerRegistry(
+                        credentialsId: 'docker-cred',
+                        toolName: 'docker'
+                    ) {
+                        sh "docker push ${IMAGE_NAME}"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy To Kubernetes') {
+            steps {
+                withKubeConfig(
+                    credentialsId: 'k8-cred',
+                    clusterName: 'abrahimcse-cluster',
+                    namespace: 'webapps',
+                    serverUrl: 'https://YOUR-EKS-ENDPOINT.ap-south-1.eks.amazonaws.com'
+                ) {
+                    sh 'kubectl apply -f deployment-service.yaml'
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                withKubeConfig(
+                    credentialsId: 'k8-cred',
+                    clusterName: 'abrahimcse-cluster',
+                    namespace: 'webapps',
+                    serverUrl: 'https://YOUR-EKS-ENDPOINT.ap-south-1.eks.amazonaws.com'
+                ) {
+                    sh 'kubectl get pods -n webapps'
+                    sh 'kubectl get svc -n webapps'
+                }
             }
         }
     }
@@ -88,16 +141,38 @@ pipeline {
     post {
 
         success {
-            echo "Pipeline completed successfully!"
+            emailext(
+                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                <h2>Build Successful</h2>
+                <p><b>Job:</b> ${env.JOB_NAME}</p>
+                <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+                <p><a href="${env.BUILD_URL}">View Build</a></p>
+                """,
+                mimeType: 'text/html',
+                to: 'abrahim.ctech@gmail.com'
+            )
         }
 
         failure {
-            echo "Pipeline failed. Check logs above."
+            emailext(
+                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                <h2>Build Failed</h2>
+                <p><b>Job:</b> ${env.JOB_NAME}</p>
+                <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+                <p><a href="${env.BUILD_URL}">View Build</a></p>
+                """,
+                mimeType: 'text/html',
+                to: 'abrahim.ctech@gmail.com'
+            )
         }
 
         always {
-            echo "Cleaning workspace..."
+            archiveArtifacts artifacts: '*.html', allowEmptyArchive: true
             cleanWs()
         }
     }
 }
+
+
